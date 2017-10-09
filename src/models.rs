@@ -1,6 +1,5 @@
 
 use chrono::naive::NaiveDateTime;
-use chrono::DateTime;
 use schema::*;
 
 #[derive(Debug, Identifiable, Queryable)]

@@ -13,7 +13,7 @@ use chrono::prelude::*;
 use twitch_archiver::schema::*;
 use twitch_archiver::models::*;
 
-use twitch_archiver::collector::{Collector, RawMessage};
+use twitch_archiver::collector::{Collector, PgCollector, RawMessage};
 
 static START: Once = ONCE_INIT;
 
@@ -47,7 +47,7 @@ fn save_message() {
     let raw_message = test_message();
 
     {
-        let mut coll = Collector::new(&connection);
+        let mut coll = PgCollector::new(&connection);
         coll.add_message(raw_message.clone()).unwrap();
     }
 

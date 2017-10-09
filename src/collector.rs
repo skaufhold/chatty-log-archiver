@@ -1,5 +1,5 @@
 
-use models::{Message, NewMessage, NewUser, User, Channel, NewChannel};
+use models::{NewMessage, NewUser, User, Channel, NewChannel};
 use std::collections::HashMap;
 use chrono::NaiveDateTime;
 use schema::{users, channels, messages};
@@ -10,7 +10,32 @@ use errors::Result;
 
 static DEFAULT_BATCH_SIZE: usize = 300;
 
-pub struct Collector<'a> {
+pub trait Collector {
+    fn add_message(&mut self, raw_message: RawMessage) -> Result<()>;
+    fn commit(&mut self) -> Result<()>;
+}
+
+pub struct DummyCollector {}
+
+impl DummyCollector {
+    pub fn new() -> DummyCollector {
+        DummyCollector {}
+    }
+}
+
+impl Collector for DummyCollector {
+    #[allow(unused_variables)]
+    fn add_message(&mut self, raw_message: RawMessage) -> Result<()> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn commit(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+pub struct PgCollector<'a> {
     batch_size: usize,
     message_batch: Vec<NewMessage>,
     channel_map: HashMap<String, i32>,
@@ -18,9 +43,9 @@ pub struct Collector<'a> {
     connection: &'a PgConnection
 }
 
-impl <'a> Collector<'a> {
-    pub fn new(connection: &PgConnection) -> Collector {
-        Collector {
+impl <'a> PgCollector<'a> {
+    pub fn new(connection: &PgConnection) -> PgCollector {
+        PgCollector {
             batch_size: DEFAULT_BATCH_SIZE,
             message_batch: Vec::new(),
             channel_map: HashMap::new(),
@@ -29,7 +54,26 @@ impl <'a> Collector<'a> {
         }
     }
 
-    pub fn add_message(&mut self, raw_message: RawMessage) -> Result<()> {
+    fn find_user_by_nick(&self, nick: &str) -> Option<User> {
+        use self::users::dsl::*;
+        let user = users.filter(name.eq(nick))
+            .first(self.connection);
+
+        user.ok()
+    }
+
+    #[allow(unused_variables)]
+    fn find_channel_by_name(&self, name: &str) -> Option<Channel> {
+        use self::channels::dsl::*;
+        let channel = channels.filter(name.eq(name))
+            .first(self.connection);
+
+        channel.ok()
+    }
+}
+
+impl <'a> Collector for PgCollector<'a> {
+    fn add_message(&mut self, raw_message: RawMessage) -> Result<()> {
         let new_user_id: i32 = match self.user_map.get(&raw_message.nick) {
             Some(id) => *id,
             None => {
@@ -82,37 +126,21 @@ impl <'a> Collector<'a> {
         Ok(())
     }
 
-    pub fn commit(&mut self) -> Result<()> {
-        let inserted_message = diesel::insert(&self.message_batch).into(messages::table)
+    fn commit(&mut self) -> Result<()> {
+        diesel::insert(&self.message_batch).into(messages::table)
             .execute(self.connection)?;
         self.message_batch.clear();
         Ok(())
     }
-
-    fn find_user_by_nick(&self, nick: &str) -> Option<User> {
-        use self::users::dsl::*;
-        let user = users.filter(name.eq(nick))
-            .first(self.connection);
-
-        user.ok()
-    }
-
-    fn find_channel_by_name(&self, name: &str) -> Option<Channel> {
-        use self::channels::dsl::*;
-        let channel = channels.filter(name.eq(name))
-            .first(self.connection);
-
-        channel.ok()
-    }
 }
 
-impl <'a> Drop for Collector<'a> {
+impl <'a> Drop for PgCollector<'a> {
     fn drop(&mut self) {
         self.commit().unwrap();
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug,Clone)]
 pub struct RawMessage {
     pub nick: String,
     pub channel: String,

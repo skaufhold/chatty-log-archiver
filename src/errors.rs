@@ -1,4 +1,6 @@
 use diesel::result::Error as DieselError;
+use std::io::Error as IOError;
+use chrono::ParseError as ChronoParseError;
 
 error_chain! {
     types {
@@ -7,6 +9,8 @@ error_chain! {
 
     foreign_links {
         Diesel(DieselError);
+        IO(IOError);
+        ChronoParseError(ChronoParseError);
     }
 
     errors {}

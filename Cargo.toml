@@ -11,6 +11,7 @@ nom = { version = "^3.2", features = ["regexp"] }
 clap = "^2.26"
 chrono = "^0.4"
 error-chain = "^0.11"
+indoc = "^0.2"
 
 [lib]
 name = "twitch_archiver"
