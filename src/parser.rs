@@ -1,11 +1,16 @@
 #![allow(dead_code)]
 
-use std::io::BufRead;
+use models::types::MessageFlag;
+use collector::{Collector, RawMessage};
+use errors::{Result, ErrorKind};
+
 use chrono::prelude::*;
-use collector::{Collector};
+use chrono::Duration;
 use nom::{IResult, not_line_ending, digit, space, line_ending};
-use errors::Result;
+
+use std::io::BufRead;
 use std::str::FromStr;
+use std::ops::Add;
 
 pub trait LogParser {
     fn parse<T: BufRead + ? Sized>(collector: &mut Collector, input: T) -> Result<()> where T: Sized;
@@ -17,6 +22,29 @@ pub struct ChattyParser {}
 struct MessageTimestamp {
     pub time: NaiveTime,
     pub date: Option<NaiveDate>
+}
+
+impl MessageTimestamp {
+    fn into_datetime(self, prev_datetime: DateTime<FixedOffset>) -> Result<DateTime<FixedOffset>> {
+        if let Some(date) = self.date {
+            Ok(prev_datetime.offset()
+                .from_local_datetime(&date.and_time(self.time))
+                .single()
+                .ok_or(ErrorKind::TimestampError)?)
+        } else {
+            let as_today = prev_datetime.date()
+                .and_time(self.time)
+                .ok_or(ErrorKind::TimestampError)?;
+            if as_today < prev_datetime {
+                Ok(as_today)
+            } else {
+                Ok(prev_datetime.date()
+                    .add(Duration::days(1))
+                    .and_time(self.time)
+                    .ok_or(ErrorKind::TimestampError)?)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,21 +60,16 @@ enum Line {
         time: MessageTimestamp,
         message: String,
     },
-    Other,
+    JoinedChannel {
+        time: MessageTimestamp,
+        channel: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct MessageSender {
     pub name: String,
-    pub modifiers: Vec<MessageModifier>
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum MessageModifier {
-    Broadcaster,
-    Moderator,
-    Prime,
-    Subscriber
+    pub modifiers: Vec<MessageFlag>
 }
 
 fn parse_date_time(data: &str) -> Result<DateTime<FixedOffset>> {
@@ -56,8 +79,12 @@ fn parse_date_time(data: &str) -> Result<DateTime<FixedOffset>> {
 
 named!(log_lines(&str) -> Vec<Line>,
     many0!(
-        terminated!(alt!(log_message | log_system_message | log_begin | log_end), opt!(line_ending))
+        terminated!(log_line, opt!(line_ending))
     )
+);
+
+named!(log_line(&str) -> Line,
+        alt!(log_message | log_joined_channel | log_system_message | log_begin | log_end)
 );
 
 named!(log_begin(&str) -> Line,
@@ -88,6 +115,20 @@ named!(log_message(&str) -> Line,
     )
 );
 
+named!(log_joined_channel(&str) -> Line,
+    map!(
+        do_parse!(
+            time: message_timestamp >>
+            space >>
+            tag!("You have joined") >>
+            space >>
+            channel: not_line_ending >>
+            (time, channel)
+        ),
+        |tuple| Line::JoinedChannel { time: tuple.0, channel: tuple.1.to_string() }
+    )
+);
+
 named!(log_system_message(&str) -> Line,
     map!(
         do_parse!(
@@ -105,10 +146,10 @@ named!(message_sender(&str) -> MessageSender,
         do_parse!(
             tag!("<") >>
             modifiers: many0!(alt!(
-                map!(char!('+'), |_| MessageModifier::Prime) |
-                map!(char!('@'), |_| MessageModifier::Moderator) |
-                map!(char!('%'), |_| MessageModifier::Subscriber) |
-                map!(char!('~'), |_| MessageModifier::Broadcaster)
+                map!(char!('+'), |_| MessageFlag::Prime) |
+                map!(char!('@'), |_| MessageFlag::Moderator) |
+                map!(char!('%'), |_| MessageFlag::Subscriber) |
+                map!(char!('~'), |_| MessageFlag::Broadcaster)
             )) >>
             name: is_not_s!(">") >>
             tag!(">") >>
@@ -159,14 +200,47 @@ named!(message_timestamp(&str) -> MessageTimestamp,
 
 impl LogParser for ChattyParser {
     fn parse<T: BufRead + ? Sized>(collector: &mut Collector, input: T) -> Result<()> where T: Sized {
-        let mut log_begin_time: Option<DateTime<Utc>> = None;
-        for line in input.lines() {
-            match log_begin(line.unwrap().as_ref()) {
-                IResult::Done(i, o) => {
-                    println!("{:?}", i);
-                    println!("{:?}", o);
+        let mut log_time: Option<DateTime<FixedOffset>> = None;
+        let mut channel: Option<String> = None;
+
+        for (line_num, line) in input.lines().enumerate() {
+            let line = line?;
+            // Parse line
+            let parse_result: IResult<&str, Line> = log_line(line.as_ref());
+
+            // Handle results
+            match parse_result {
+                IResult::Done(_, line) => {
+                    match line {
+                        Line::BeginLog(time) | Line::EndLog(time) => {
+                            log_time = Some(time);
+                        },
+                        Line::Message { time, message, sender } => {
+                            let channel = channel.as_ref().ok_or(ErrorKind::MissingJoinChannel)?;
+                            let prev_time = log_time.ok_or(ErrorKind::MissingBeginTimestamp)?;
+                            log_time = Some(time.into_datetime(prev_time)?);
+                            collector.add_message(RawMessage {
+                                message,
+                                channel: channel.to_owned(),
+                                nick: sender.name,
+                                sent_at: log_time.unwrap().naive_utc(),
+                                prime: false,
+                                moderator: false,
+                            })?;
+                        },
+                        Line::SystemMessage { time, .. } => {
+                            let prev_time = log_time.ok_or(ErrorKind::MissingBeginTimestamp)?;
+                            log_time = Some(time.into_datetime(prev_time)?);
+                        },
+                        Line::JoinedChannel { channel: joined, time } => {
+                            let prev_time = log_time.ok_or(ErrorKind::MissingBeginTimestamp)?;
+                            log_time = Some(time.into_datetime(prev_time)?);
+                            channel = Some(joined);
+                        }
+                    }
                 }
-                err => println!("{:?}", err)
+                IResult::Incomplete(_) => Err(ErrorKind::IncompleteLineError(line_num))?,
+                IResult::Error(err) => Err(ErrorKind::ParseError(line_num, err))?,
             }
         }
         Ok(())
@@ -176,6 +250,24 @@ impl LogParser for ChattyParser {
 #[cfg(test)]
 mod test {
     use super::*;
+    use collector::VecCollector;
+    use std::io::BufReader;
+
+    #[test]
+    fn parse_full() {
+        let mut collector = VecCollector::new();
+        let text: &str = indoc!("
+        # Log started: 2017-10-05 23:40:00 +0200
+        [23:45:00] You have joined #_cerebot
+        [00:10:00] <@+JohnDoe> test message 1
+        [01:10:00] <@+JohnDoe> test message 2
+        [02:10:00] <@+JohnDoe> test message 3
+        # Log closed: 2017-10-08 15:19:46 +0200
+        ");
+        ChattyParser::parse(&mut collector, BufReader::new(text.as_bytes()))
+            .unwrap();
+        println!("{:?}", collector.messages)
+    }
 
     #[test]
     fn parse_log_begin() {
@@ -199,40 +291,40 @@ mod test {
 
     #[test]
     fn parse_sender() {
-        let regular = "<joehndoe>";
+        let regular = "<JohnDoe>";
         assert_eq!(message_sender(regular).unwrap(),
                    ("", MessageSender {
-                       name: "joehndoe".to_owned(), modifiers: vec!()
+                       name: "JohnDoe".to_owned(), modifiers: vec!()
                    })
         );
     }
 
     #[test]
     fn parse_sender_modifiers() {
-        let prime = "<+joehndoe>";
-        let moderator = "<@joehndoe>";
-        let broadcaster = "<~joehndoe>";
-        let multi = "<~+@%joehndoe>";
+        let prime = "<+JohnDoe>";
+        let moderator = "<@JohnDoe>";
+        let broadcaster = "<~JohnDoe>";
+        let multi = "<~+@%JohnDoe>";
 
         assert_eq!(message_sender(moderator).unwrap(),
-                   ("", MessageSender { name: "joehndoe".to_owned(), modifiers: vec!(MessageModifier::Moderator) })
+                   ("", MessageSender { name: "JohnDoe".to_owned(), modifiers: vec!(MessageFlag::Moderator) })
         );
 
         assert_eq!(message_sender(prime).unwrap(),
-                   ("", MessageSender { name: "joehndoe".to_owned(), modifiers: vec!(MessageModifier::Prime) })
+                   ("", MessageSender { name: "JohnDoe".to_owned(), modifiers: vec!(MessageFlag::Prime) })
         );
 
         assert_eq!(message_sender(broadcaster).unwrap(),
-                   ("", MessageSender { name: "joehndoe".to_owned(), modifiers: vec!(MessageModifier::Broadcaster) })
+                   ("", MessageSender { name: "JohnDoe".to_owned(), modifiers: vec!(MessageFlag::Broadcaster) })
         );
 
         assert_eq!(message_sender(multi).unwrap(),
                    ("", MessageSender {
-                       name: "joehndoe".to_owned(), modifiers: vec!(
-                           MessageModifier::Broadcaster,
-                           MessageModifier::Prime,
-                           MessageModifier::Moderator,
-                           MessageModifier::Subscriber,
+                       name: "JohnDoe".to_owned(), modifiers: vec!(
+                           MessageFlag::Broadcaster,
+                           MessageFlag::Prime,
+                           MessageFlag::Moderator,
+                           MessageFlag::Subscriber,
                        )
                    })
         );
@@ -265,7 +357,7 @@ mod test {
             },
             message: "this is a test".to_owned(),
             sender: MessageSender {
-                name: "JohnDoe".to_owned(), modifiers: vec!(MessageModifier::Prime)
+                name: "JohnDoe".to_owned(), modifiers: vec!(MessageFlag::Prime)
             },
         };
 
@@ -290,7 +382,7 @@ mod test {
             },
             message: "this is a test".to_owned(),
             sender: MessageSender {
-                name: "JohnDoe".to_owned(), modifiers: vec!(MessageModifier::Prime)
+                name: "JohnDoe".to_owned(), modifiers: vec!(MessageFlag::Prime)
             },
         })
     }

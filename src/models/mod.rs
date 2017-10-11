@@ -1,6 +1,9 @@
 
 use chrono::naive::NaiveDateTime;
 use schema::*;
+use types::MessageFlag;
+
+pub mod types;
 
 #[derive(Debug, Identifiable, Queryable)]
 pub struct User {
@@ -35,8 +38,7 @@ pub struct Message {
     pub channel_id: i32,
     pub message: String,
     pub sent_at: NaiveDateTime,
-    pub prime: bool,
-    pub moderator: bool
+    pub flags: Vec<MessageFlag>
 }
 
 #[derive(Debug, Insertable)]
@@ -46,6 +48,5 @@ pub struct NewMessage {
     pub channel_id: i32,
     pub message: String,
     pub sent_at: NaiveDateTime,
-    pub prime: bool,
-    pub moderator: bool
+    pub flags: Vec<MessageFlag>
 }

@@ -1,6 +1,4 @@
-use diesel::result::Error as DieselError;
-use std::io::Error as IOError;
-use chrono::ParseError as ChronoParseError;
+use nom::ErrorKind as NomErrorKind;
 
 error_chain! {
     types {
@@ -8,10 +6,29 @@ error_chain! {
     }
 
     foreign_links {
-        Diesel(DieselError);
-        IO(IOError);
-        ChronoParseError(ChronoParseError);
+        Diesel(::diesel::result::Error);
+        IoError(::std::io::Error);
+        ChronoParseError(::chrono::ParseError);
+        NomError(::nom::ErrorKind);
     }
 
-    errors {}
+    errors {
+        TimestampError {
+            description("Error determining full message timestamp")
+        }
+        MissingBeginTimestamp {
+            description("Log contained no beginning timestamp")
+        }
+        MissingJoinChannel {
+            description("No 'Joined channel' line found before first message")
+        }
+        ParseError(line_num: usize, cause: NomErrorKind) {
+            description("Parsing Error")
+            display("Parsing Error: '{}' in line {}", cause, line_num)
+        }
+        IncompleteLineError(line_num: usize) {
+            description("Line ended prematurely, parsing incomplete")
+            display("Parsing Error: Line {} was incomplete", line_num)
+        }
+    }
 }

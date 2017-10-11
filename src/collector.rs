@@ -15,17 +15,22 @@ pub trait Collector {
     fn commit(&mut self) -> Result<()>;
 }
 
-pub struct DummyCollector {}
+pub struct VecCollector {
+    pub messages: Vec<RawMessage>
+}
 
-impl DummyCollector {
-    pub fn new() -> DummyCollector {
-        DummyCollector {}
+impl VecCollector {
+    pub fn new() -> VecCollector {
+        VecCollector {
+            messages: vec!()
+        }
     }
 }
 
-impl Collector for DummyCollector {
+impl Collector for VecCollector {
     #[allow(unused_variables)]
     fn add_message(&mut self, raw_message: RawMessage) -> Result<()> {
+        self.messages.push(raw_message);
         Ok(())
     }
 
@@ -62,51 +67,49 @@ impl <'a> PgCollector<'a> {
         user.ok()
     }
 
-    #[allow(unused_variables)]
-    fn find_channel_by_name(&self, name: &str) -> Option<Channel> {
+    fn find_channel_by_name(&self, channel: &str) -> Option<Channel> {
         use self::channels::dsl::*;
-        let channel = channels.filter(name.eq(name))
+        let channel = channels.filter(name.eq(channel))
             .first(self.connection);
 
         channel.ok()
+    }
+
+    fn find_or_create_channel_id(&self, name: &str) -> Result<i32> {
+        if let Some(id) = self.channel_map.get(name) {
+            Ok(*id)
+        } else if let Some(channel) = self.find_channel_by_name(name) {
+            Ok(channel.id)
+        } else {
+            let new_channel = NewChannel { name };
+            diesel::insert(&new_channel).into(channels::table)
+                .get_result(self.connection)
+                .map(|c: Channel| c.id)
+                .map_err(|e| e.into())
+        }
+    }
+
+    fn find_or_create_user_id(&self, name: &str) -> Result<i32> {
+        if let Some(id) = self.user_map.get(name) {
+            Ok(*id)
+        } else if let Some(user) = self.find_user_by_nick(name) {
+            Ok(user.id)
+        } else {
+            let new_user = NewUser {
+                name,
+            };
+            diesel::insert(&new_user).into(users::table)
+                .get_result(self.connection)
+                .map(|u: User| u.id)
+                .map_err(|e| e.into())
+        }
     }
 }
 
 impl <'a> Collector for PgCollector<'a> {
     fn add_message(&mut self, raw_message: RawMessage) -> Result<()> {
-        let new_user_id: i32 = match self.user_map.get(&raw_message.nick) {
-            Some(id) => *id,
-            None => {
-                self.find_user_by_nick(raw_message.nick.as_ref())
-                    .or_else(|| {
-                        let new_user = NewUser {
-                            name: raw_message.nick.as_ref(),
-                        };
-                        let inserted_user: User = diesel::insert(&new_user).into(users::table)
-                            .get_result(self.connection)
-                            .expect("Error saving new user");
-                        Some(inserted_user)
-                    })
-                    .unwrap().id
-            }
-        };
-
-        let new_channel_id: i32 = match self.channel_map.get(&raw_message.channel) {
-            Some(id) => *id,
-            None => {
-                self.find_channel_by_name(raw_message.channel.as_ref())
-                    .or_else(|| {
-                        let new_channel = NewChannel {
-                            name: raw_message.channel.as_ref()
-                        };
-                        let inserted_channel: Channel = diesel::insert(&new_channel).into(channels::table)
-                            .get_result(self.connection)
-                            .expect("Error saving new channel");
-                        Some(inserted_channel)
-                    })
-                    .unwrap().id
-            }
-        };
+        let new_user_id: i32 = self.find_or_create_user_id(raw_message.nick.as_ref())?;
+        let new_channel_id: i32 = self.find_or_create_channel_id(raw_message.channel.as_ref())?;
 
         let new_message = NewMessage {
             user_id: new_user_id,
@@ -120,7 +123,7 @@ impl <'a> Collector for PgCollector<'a> {
         self.message_batch.push(new_message);
 
         if self.message_batch.len() > self.batch_size {
-            self.commit().unwrap();
+            self.commit()?;
         }
 
         Ok(())
