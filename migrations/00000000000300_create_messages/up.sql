@@ -7,7 +7,7 @@ CREATE TABLE public.messages
   channel_id INT NOT NULL,
   message text NOT NULL,
   sent_at TIMESTAMP NOT NULL,
-  flags message_flag[] NOT NULL,
+  flags SMALLINT[] NOT NULL,
   PRIMARY KEY (id),
   CONSTRAINT message_user_id_fk FOREIGN KEY (user_id) REFERENCES public.users (id) MATCH SIMPLE
   ON UPDATE CASCADE

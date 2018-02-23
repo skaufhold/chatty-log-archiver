@@ -63,7 +63,9 @@ enum Line {
     JoinedChannel {
         time: MessageTimestamp,
         channel: String,
-    }
+    },
+    Separator,
+    Other(String)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,7 +86,21 @@ named!(log_lines(&str) -> Vec<Line>,
 );
 
 named!(log_line(&str) -> Line,
-        alt!(log_message | log_joined_channel | log_system_message | log_begin | log_end)
+        alt!(log_message | log_joined_channel | log_system_message | log_begin | log_end | log_separator | log_other)
+);
+
+named!(log_separator(&str) -> Line,
+    map!(
+        tag!("-"),
+        |_| Line::Separator
+    )
+);
+
+named!(log_other(&str) -> Line,
+    map!(
+        not_line_ending,
+        |text| Line::Other(text.to_string())
+    )
 );
 
 named!(log_begin(&str) -> Line,
@@ -224,8 +240,7 @@ impl LogParser for ChattyParser {
                                 channel: channel.to_owned(),
                                 nick: sender.name,
                                 sent_at: log_time.unwrap().naive_utc(),
-                                prime: false,
-                                moderator: false,
+                                flags: sender.modifiers
                             })?;
                         },
                         Line::SystemMessage { time, .. } => {
@@ -236,11 +251,16 @@ impl LogParser for ChattyParser {
                             let prev_time = log_time.ok_or(ErrorKind::MissingBeginTimestamp)?;
                             log_time = Some(time.into_datetime(prev_time)?);
                             channel = Some(joined);
+                        },
+                        Line::Separator => {},
+                        Line::Other(msg) => {
+                            println!("Unknown message type encountered, ignoring line {}", line_num + 1);
+                            println!("{}", msg);
                         }
                     }
                 }
-                IResult::Incomplete(_) => Err(ErrorKind::IncompleteLineError(line_num))?,
-                IResult::Error(err) => Err(ErrorKind::ParseError(line_num, err))?,
+                IResult::Incomplete(_) => Err(ErrorKind::IncompleteLineError(line_num + 1))?,
+                IResult::Error(err) => Err(ErrorKind::ParseError(line_num + 1, err))?,
             }
         }
         Ok(())
@@ -266,6 +286,7 @@ mod test {
         ");
         ChattyParser::parse(&mut collector, BufReader::new(text.as_bytes()))
             .unwrap();
+
         println!("{:?}", collector.messages)
     }
 

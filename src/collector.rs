@@ -1,5 +1,6 @@
 
 use models::{NewMessage, NewUser, User, Channel, NewChannel};
+use models::types::MessageFlag;
 use std::collections::HashMap;
 use chrono::NaiveDateTime;
 use schema::{users, channels, messages};
@@ -8,7 +9,7 @@ use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use errors::Result;
 
-static DEFAULT_BATCH_SIZE: usize = 300;
+static DEFAULT_BATCH_SIZE: usize = 2000;
 
 pub trait Collector {
     fn add_message(&mut self, raw_message: RawMessage) -> Result<()>;
@@ -116,13 +117,12 @@ impl <'a> Collector for PgCollector<'a> {
             channel_id: new_channel_id,
             message: raw_message.message,
             sent_at: raw_message.sent_at,
-            prime: raw_message.prime,
-            moderator: raw_message.moderator,
+            flags: raw_message.flags.into_iter().map(|f| f.into()).collect()
         };
 
         self.message_batch.push(new_message);
 
-        if self.message_batch.len() > self.batch_size {
+        if self.message_batch.len() >= self.batch_size {
             self.commit()?;
         }
 
@@ -149,6 +149,5 @@ pub struct RawMessage {
     pub channel: String,
     pub message: String,
     pub sent_at: NaiveDateTime,
-    pub prime: bool,
-    pub moderator: bool
+    pub flags: Vec<MessageFlag>
 }

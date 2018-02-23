@@ -11,7 +11,7 @@ table! {
         user_id -> Int4,
         channel_id -> Int4,
         message -> Text,
-        flags -> ::models::types::sql::MessageFlag,
+        flags -> Array<SmallInt>,
         sent_at -> Timestamp,
         prime -> Bool,
         moderator -> Bool,

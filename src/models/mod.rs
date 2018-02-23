@@ -1,7 +1,7 @@
 
 use chrono::naive::NaiveDateTime;
 use schema::*;
-use types::MessageFlag;
+use self::types::MessageFlag;
 
 pub mod types;
 
@@ -48,5 +48,5 @@ pub struct NewMessage {
     pub channel_id: i32,
     pub message: String,
     pub sent_at: NaiveDateTime,
-    pub flags: Vec<MessageFlag>
+    pub flags: Vec<i16>
 }

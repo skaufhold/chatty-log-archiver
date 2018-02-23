@@ -17,6 +17,6 @@ indoc = "^0.2"
 name = "twitch_archiver"
 path = "src/lib.rs"
 
-#[[bin]]
-#name = "twitch_archiver"
-#path = "src/bin.rs"
+[[bin]]
+name = "twitch_archiver"
+path = "src/bin.rs"
