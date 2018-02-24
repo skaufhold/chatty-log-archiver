@@ -1,6 +1,5 @@
 #![recursion_limit="128"]
 
-#[macro_use] extern crate indoc;
 #[macro_use] extern crate error_chain;
 #[macro_use] extern crate nom;
 #[macro_use] extern crate diesel_codegen;

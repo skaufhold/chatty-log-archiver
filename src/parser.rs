@@ -18,6 +18,7 @@ pub trait LogParser {
 
 pub struct ChattyParser {}
 
+/// Raw time information extracted from a chat message
 #[derive(Debug, Clone, PartialEq)]
 struct MessageTimestamp {
     pub time: NaiveTime,
@@ -25,6 +26,15 @@ struct MessageTimestamp {
 }
 
 impl MessageTimestamp {
+    /// Turns this raw time into a real timestamp using the timestamp of the message that preceded it.
+    ///
+    /// If this time already includes full date and time information, this function is a simple type
+    /// conversion. If date information is missing, it tries to infer the date of this timestamp from
+    /// the last confirmed timestamp that preceded it.
+    ///
+    /// # Arguments
+    ///
+    /// * `prev_datetime` - Last known full timestamp that preceded this one
     fn into_datetime(self, prev_datetime: DateTime<FixedOffset>) -> Result<DateTime<FixedOffset>> {
         if let Some(date) = self.date {
             Ok(prev_datetime.offset()
@@ -35,7 +45,7 @@ impl MessageTimestamp {
             let as_today = prev_datetime.date()
                 .and_time(self.time)
                 .ok_or(ErrorKind::TimestampError)?;
-            if as_today < prev_datetime {
+            if as_today >= prev_datetime {
                 Ok(as_today)
             } else {
                 Ok(prev_datetime.date()
@@ -47,6 +57,7 @@ impl MessageTimestamp {
     }
 }
 
+/// A line as it was parsed from the log
 #[derive(Debug, Clone, PartialEq)]
 enum Line {
     BeginLog(DateTime<FixedOffset>),
@@ -63,9 +74,12 @@ enum Line {
     JoinedChannel {
         time: MessageTimestamp,
         channel: String,
-    }
+    },
+    Separator,
+    Other(String)
 }
 
+/// Parsed information about the sender of a message
 #[derive(Debug, Clone, PartialEq)]
 struct MessageSender {
     pub name: String,
@@ -84,7 +98,21 @@ named!(log_lines(&str) -> Vec<Line>,
 );
 
 named!(log_line(&str) -> Line,
-        alt!(log_message | log_joined_channel | log_system_message | log_begin | log_end)
+        alt!(log_message | log_joined_channel | log_system_message | log_begin | log_end | log_separator | log_other)
+);
+
+named!(log_separator(&str) -> Line,
+    map!(
+        tag!("-"),
+        |_| Line::Separator
+    )
+);
+
+named!(log_other(&str) -> Line,
+    map!(
+        not_line_ending,
+        |text| Line::Other(text.to_string())
+    )
 );
 
 named!(log_begin(&str) -> Line,
@@ -224,8 +252,7 @@ impl LogParser for ChattyParser {
                                 channel: channel.to_owned(),
                                 nick: sender.name,
                                 sent_at: log_time.unwrap().naive_utc(),
-                                prime: false,
-                                moderator: false,
+                                flags: sender.modifiers
                             })?;
                         },
                         Line::SystemMessage { time, .. } => {
@@ -236,11 +263,16 @@ impl LogParser for ChattyParser {
                             let prev_time = log_time.ok_or(ErrorKind::MissingBeginTimestamp)?;
                             log_time = Some(time.into_datetime(prev_time)?);
                             channel = Some(joined);
+                        },
+                        Line::Separator => {},
+                        Line::Other(msg) => {
+                            println!("WARN: Unknown message type encountered, ignoring line {}", line_num + 1);
+                            println!("Line was: {}", msg);
                         }
                     }
                 }
-                IResult::Incomplete(_) => Err(ErrorKind::IncompleteLineError(line_num))?,
-                IResult::Error(err) => Err(ErrorKind::ParseError(line_num, err))?,
+                IResult::Incomplete(_) => Err(ErrorKind::IncompleteLineError(line_num + 1))?,
+                IResult::Error(err) => Err(ErrorKind::ParseError(line_num + 1, err))?,
             }
         }
         Ok(())
@@ -256,17 +288,15 @@ mod test {
     #[test]
     fn parse_full() {
         let mut collector = VecCollector::new();
-        let text: &str = indoc!("
-        # Log started: 2017-10-05 23:40:00 +0200
-        [23:45:00] You have joined #_cerebot
-        [00:10:00] <@+JohnDoe> test message 1
-        [01:10:00] <@+JohnDoe> test message 2
-        [02:10:00] <@+JohnDoe> test message 3
-        # Log closed: 2017-10-08 15:19:46 +0200
-        ");
+        let text: &str =
+"# Log started: 2017-10-05 23:40:00 +0200
+[23:45:00] You have joined #_cerebot
+[00:10:00] <@+JohnDoe> test message 1
+[01:10:00] <@+JohnDoe> test message 2
+[02:10:00] <@+JohnDoe> test message 3
+# Log closed: 2017-10-08 15:19:46 +0200";
         ChattyParser::parse(&mut collector, BufReader::new(text.as_bytes()))
             .unwrap();
-        println!("{:?}", collector.messages)
     }
 
     #[test]
@@ -349,6 +379,26 @@ mod test {
     }
 
     #[test]
+    fn timestamp_sequence() {
+        let times = vec![
+            "[2017-10-08 22:00:00]", "2017-10-08T22:00:00+0200",
+            "[23:00:00]", "2017-10-08T23:00:00+0200",
+            "[00:00:00]", "2017-10-09T00:00:00+0200",
+            "[15:00:00]", "2017-10-09T15:00:00+0200",
+            "[15:00:00]", "2017-10-09T15:00:00+0200",
+        ];
+
+        let mut iter = times.iter();
+        let mut prev_time = "2017-10-08T20:00:00+0200".parse::<DateTime<FixedOffset>>().unwrap();
+        while let Some(time_str) = iter.next() {
+            let expected = iter.next().unwrap().parse::<DateTime<FixedOffset>>().unwrap();
+            let new_datetime = message_timestamp(time_str).unwrap().1.into_datetime(prev_time).unwrap();
+            assert_eq!(new_datetime, expected);
+            prev_time = new_datetime;
+        }
+    }
+
+    #[test]
     fn parse_log_message() {
         let expected = Line::Message {
             time: MessageTimestamp {
@@ -368,11 +418,11 @@ mod test {
 
     #[test]
     fn parse_lines() {
-        let lines = indoc!("
-            # Log started: 2017-10-08 22:05:40 +0200
-            [2017-10-08 22:05:40] Joining #some_channel..
-            [2017-10-08 22:05:44] <+JohnDoe> this is a test
-        ");
+        let lines =
+"# Log started: 2017-10-08 22:05:40 +0200
+[2017-10-08 22:05:40] Joining #some_channel..
+[2017-10-08 22:05:44] <+JohnDoe> this is a test
+";
 
         let parsed = log_lines(lines).unwrap();
         assert_eq!(parsed.1[2], Line::Message {
